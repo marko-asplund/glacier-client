@@ -1,0 +1,23 @@
+<configuration>
+  <property name="logPattern" value="%r %msg%n" />
+
+  <appender name="stdout" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>${logPattern}</pattern>
+    </encoder>
+  </appender>
+
+  <appender name="file" class="ch.qos.logback.core.FileAppender">
+    <file>glacier.log</file>
+    <append>false</append>
+    <encoder>
+      <pattern>${logPattern}</pattern>
+    </encoder>
+  </appender>
+
+  <logger name="fi.markoa" level="debug" />
+
+  <root level="info">
+    <appender-ref ref="file" />
+  </root>
+</configuration>
