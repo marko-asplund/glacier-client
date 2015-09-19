@@ -5,4 +5,4 @@ Amazon Glacier backup tool with the following features
 - archive management: upload, delete, download
 - local catalog management: add, list, delete, synchronize with Glacier inventory
 
-The tool can be used in Scala programs as well as an interactive backup CLI (via REPL).
+glacier-client can be used through its API in Scala programs or as an interactive backup CLI (via REPL).
