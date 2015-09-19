@@ -25,7 +25,7 @@ case class Job(id: String, vaultARN: String, action: String, description: String
 
 case class JobOutput(archiveDescription: String, contentType: String, checksum: String, status: Int, output: InputStream)
 
-case class Archive(id: String, location: String, checksum: Option[String], description: Option[String])
+case class Archive(id: String, location: Option[String], checksum: Option[String], description: Option[String])
 
 case class AmInventory(vaultARN: String, inventoryDate: ZonedDateTime, archives: List[AmArchive])
 case class AmArchive(id: String, description: String, created: ZonedDateTime, size: Long, treeHash: String)
@@ -50,14 +50,17 @@ object Converters {
     JobOutput(o.getArchiveDescription, o.getContentType, o.getChecksum, o.getStatus, o.getBody)
 
   def asArchive(a: UploadArchiveResult) =
-    Archive(a.getArchiveId, a.getLocation, Some(a.getChecksum), None)
+    Archive(a.getArchiveId, Some(a.getLocation), Some(a.getChecksum), None)
+
+  def fromAmArchive(am: AmArchive) = Archive(am.id, None, Some(am.treeHash), Some(am.description))
 
   implicit def ArchiveCodecJson = 
     casecodec4(Archive.apply, Archive.unapply)("archiveId", "location", "checksum", "description")
 
-  implicit def DateTimeEncodeJson: EncodeJson[ZonedDateTime] = EncodeJson(d => jString(d.toString))
-  implicit def DateTimeDecodeJson: DecodeJson[ZonedDateTime] =
-    optionDecoder(_.string flatMap (s => tryTo(ZonedDateTime.parse(s))), "java.time.ZonedDateTime")
+  implicit def DateTimeCodecJson: CodecJson[ZonedDateTime] = CodecJson(
+    (d: ZonedDateTime) => jString(d.toString),
+    c => for (s <- c.as[String]) yield ZonedDateTime.parse(s)
+  )
   implicit def AmArchiveCodecJson =
     casecodec5(AmArchive.apply, AmArchive.unapply)("ArchiveId", "ArchiveDescription", "CreationDate",
       "Size", "SHA256TreeHash")
@@ -157,12 +160,18 @@ class GlacierClient(endPoint: String, credentials: AWSCredentialsProvider) {
     o
   }
 
+  def synchronizeLocalCatalog(vaultName: String) = getLatestVaultInventory(vaultName) match {
+    case Some(i) => i.archives.map(a => fromAmArchive(a)).foreach(a => catAddArchive(vaultName, a))
+    case _ =>
+  }
+
   private def getJobOutput(vaultName: String, jobId: String) =
     asJobOutput(client.getJobOutput(new GetJobOutputRequest().withVaultName(vaultName).withJobId(jobId)))
 
 
   // ========= Glacier archive management =========
 
+  // TODO: return Future[Archive]
   def uploadArchive(vaultName: String, archiveDescription: String, sourceFile: String) = {
     import ProgressEventType._
     val atm = new ArchiveTransferManager(client, credentials)
@@ -182,7 +191,7 @@ class GlacierClient(endPoint: String, credentials: AWSCredentialsProvider) {
       }
     }
     val r = atm.upload("-", vaultName, archiveDescription, new File(sourceFile), lsnr)
-    val a = Archive(r.getArchiveId, sourceFile, None, Some(archiveDescription))
+    val a = Archive(r.getArchiveId, Some(sourceFile), None, Some(archiveDescription))
     archive.success(a)
     a
   }
@@ -195,12 +204,14 @@ class GlacierClient(endPoint: String, credentials: AWSCredentialsProvider) {
   def downloadArchive(vaultName: String, archiveId: String, targetFile: String) = {
     import ProgressEventType._
     val atm = new ArchiveTransferManager(client, credentials)
-    // TODO: implement progressmeter
     val lsnr = new ProgressListener {
       def progressChanged(ev: ProgressEvent): Unit = ev.getEventType match {
         case TRANSFER_COMPLETED_EVENT =>
+          println(s"archive download completed: $archiveId")
         case TRANSFER_CANCELED_EVENT =>
+          println(s"archive download canceled: $archiveId")
         case TRANSFER_FAILED_EVENT =>
+          println(s"archive download failed: $archiveId")
         case _ =>
       }
     }
