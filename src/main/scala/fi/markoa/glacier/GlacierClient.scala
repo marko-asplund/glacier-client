@@ -10,10 +10,13 @@ import scala.io.Source
 import com.typesafe.scalalogging.Logger
 import org.slf4j.LoggerFactory
 import com.amazonaws.auth.AWSCredentialsProvider
+import com.amazonaws.regions.{Region, Regions}
 import com.amazonaws.auth.profile.ProfileCredentialsProvider
 import com.amazonaws.services.glacier.AmazonGlacierClient
 import com.amazonaws.services.glacier.model._
 import com.amazonaws.services.glacier.transfer.ArchiveTransferManager
+import com.amazonaws.services.sns.AmazonSNSClient
+import com.amazonaws.services.sqs.AmazonSQSClient
 import com.amazonaws.event.{ProgressListener, ProgressEvent, ProgressEventType}
 import argonaut._, Argonaut._
 
@@ -68,13 +71,14 @@ object Converters {
     casecodec3(AmInventory.apply, AmInventory.unapply)("VaultARN", "InventoryDate", "ArchiveList")
 }
 
-class GlacierClient(endPoint: String, credentials: AWSCredentialsProvider) {
+class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
   import Converters._
 
   val logger = Logger(LoggerFactory.getLogger(classOf[GlacierClient]))
 
+  val region = Region.getRegion(regionName)
   val client = new AmazonGlacierClient(credentials)
-  client.setEndpoint(endPoint)
+  client.setRegion(region)
 
   val b64enc = java.util.Base64.getEncoder
   val b64dec = java.util.Base64.getDecoder
@@ -203,7 +207,12 @@ class GlacierClient(endPoint: String, credentials: AWSCredentialsProvider) {
 
   def downloadArchive(vaultName: String, archiveId: String, targetFile: String) = {
     import ProgressEventType._
-    val atm = new ArchiveTransferManager(client, credentials)
+    val sqs = new AmazonSQSClient(credentials)
+    sqs.setRegion(region)
+    val sns = new AmazonSNSClient(credentials)
+    sns.setRegion(region)
+
+    val atm = new ArchiveTransferManager(client, sqs, sns)
     val lsnr = new ProgressListener {
       def progressChanged(ev: ProgressEvent): Unit = ev.getEventType match {
         case TRANSFER_COMPLETED_EVENT =>
@@ -225,6 +234,6 @@ class GlacierClient(endPoint: String, credentials: AWSCredentialsProvider) {
 }
 
 object GlacierClient {
-  def apply(endPoint: String, credentials: AWSCredentialsProvider) = new GlacierClient(endPoint, credentials)
-  def apply() = new GlacierClient("https://glacier.eu-central-1.amazonaws.com/", new ProfileCredentialsProvider)
+  def apply(region: Regions, credentials: AWSCredentialsProvider) = new GlacierClient(region, credentials)
+  def apply() = new GlacierClient(Regions.EU_CENTRAL_1, new ProfileCredentialsProvider)
 }
