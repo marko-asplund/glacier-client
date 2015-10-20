@@ -1,8 +1,8 @@
 organization  := "fi.markoa"
 
-version       := "0.1"
+version       := "0.2"
 
-scalaVersion  := "2.11.6"
+scalaVersion  := "2.11.7"
 
 scalacOptions := Seq("-feature", "-deprecation", "-encoding", "utf8")
 
@@ -11,6 +11,6 @@ libraryDependencies ++= Seq(
   "ch.qos.logback" % "logback-classic" % "1.1.3",
   "org.scalatest" %% "scalatest" % "2.2.5" % "test",
   "com.amazonaws" % "aws-java-sdk-glacier" % "1.10.27",
-  "io.argonaut" %% "argonaut" % "6.0.4"
+  "io.argonaut" %% "argonaut" % "6.1"
 )
 

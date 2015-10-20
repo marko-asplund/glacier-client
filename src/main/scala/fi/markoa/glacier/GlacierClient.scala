@@ -3,7 +3,7 @@ package fi.markoa.glacier
 import java.time.ZonedDateTime
 import java.io.{InputStream, File, FileWriter}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicLong, AtomicBoolean}
-import scala.concurrent.{Promise, Await}
+import scala.concurrent.{Future, Promise, Await}
 import scala.concurrent.duration._
 import scala.util.{Try, Success, Failure}
 import scala.collection.JavaConversions._
@@ -18,7 +18,7 @@ import com.amazonaws.services.glacier.model._
 import com.amazonaws.services.glacier.transfer.ArchiveTransferManager
 import com.amazonaws.services.sns.AmazonSNSClient
 import com.amazonaws.services.sqs.AmazonSQSClient
-import com.amazonaws.event.{ProgressListener, ProgressEvent, ProgressEventType}
+import com.amazonaws.event.{ProgressListener => AWSProgressListener, ProgressEvent, ProgressEventType}
 import argonaut._, Argonaut._
 
 case class Vault(creationDate: ZonedDateTime, lastInventoryDate: Option[ZonedDateTime],
@@ -36,6 +36,11 @@ case class AmArchive(id: String, description: String, created: ZonedDateTime, si
 
 object DateTimeOrdering extends Ordering[ZonedDateTime] {
   def compare(a: ZonedDateTime, b: ZonedDateTime) = a compareTo b
+}
+
+object DataTransferEventType extends Enumeration {
+  type DataTransferEventType = Value
+  val TransferProgress, TransferCompleted, TransferCanceled, TransferFailed = Value
 }
 
 object Converters {
@@ -176,44 +181,50 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
 
   // ========= Glacier archive management =========
 
-  // TODO: return Future[Archive] ?
-  def uploadArchive(vaultName: String, archiveDescription: String, sourceFile: String): Archive = {
+  import DataTransferEventType._
+  def awsUploadProgressListener(bytesToTransfer: Double, tickInterval: Int,
+                                  listener: (DataTransferEventType, String, Option[Int]) => Unit) = {
     import ProgressEventType._
-    val atm = new ArchiveTransferManager(client, credentials)
-    val archive = Promise[Archive]()
-    val lsnr = new AWSProgressListener {
-      val bytesToSend = (new File(sourceFile)).length.toDouble
-      val bytesSent = new AtomicLong
+    new AWSProgressListener {
+      val bytesTransferred = new AtomicLong
       val prevPctMark = new AtomicInteger
       val transferStarted = new AtomicBoolean
-      val tick = 5
-      def getArchive = Await.result(archive.future, Duration(2, "seconds"))
       def progressChanged(ev: ProgressEvent): Unit = ev.getEventType match {
-        case HTTP_REQUEST_CONTENT_RESET_EVENT =>
-          transferStarted.compareAndSet(false, true)
-        case REQUEST_BYTE_TRANSFER_EVENT =>
-          if (transferStarted.get) {
-            val s = bytesSent.addAndGet(ev.getBytesTransferred)
-            val pct = ((s/bytesToSend)*100).toInt
-            if ( (pct/tick) > prevPctMark.get) {
-              prevPctMark.set(pct/tick)
-              println(s"upload progress: $pct%");
-            }
+        case HTTP_REQUEST_CONTENT_RESET_EVENT => transferStarted.compareAndSet(false, true)
+        case REQUEST_BYTE_TRANSFER_EVENT => if (transferStarted.get) {
+          val s = bytesTransferred.addAndGet(ev.getBytesTransferred)
+          val pct = ((s/bytesToTransfer)*100).toInt
+          if ( (pct/tickInterval) > prevPctMark.get) {
+            prevPctMark.set(pct/tickInterval)
+            listener(TransferProgress, s"transfer progress: $pct%", Some(pct))
           }
-        case TRANSFER_COMPLETED_EVENT =>
-          catAddArchive(vaultName, getArchive)
-          println(s"\narchive upload completed: ${getArchive.id}")
-        case TRANSFER_CANCELED_EVENT =>
-          println(s"\ntransfer canceled: ${getArchive.id}")
-        case TRANSFER_FAILED_EVENT =>
-          println(s"\ntransfer failed: ${getArchive.id}")
+        }
+        case TRANSFER_COMPLETED_EVENT => listener(TransferCompleted, s"transfer completed", None)
+        case TRANSFER_CANCELED_EVENT => listener(TransferCanceled, s"transfer canceled", None)
+        case TRANSFER_FAILED_EVENT => listener(TransferFailed, s"transfer failed", None)
         case _ =>
       }
     }
-    val r = atm.upload("-", vaultName, archiveDescription, new File(sourceFile), lsnr)
-    val a = Archive(r.getArchiveId, Some(sourceFile), None, Some(archiveDescription))
-    archive.success(a)
-    a
+  }
+
+  def uploadArchive(vaultName: String, archiveDescription: String, sourceFile: String): Archive =
+    Await.result(uploadArchive(vaultName, archiveDescription, sourceFile,
+                  (evType: DataTransferEventType, msg: String, pct: Option[Int]) => println(s"$msg")), Duration.Inf)
+
+  def uploadArchive(vaultName: String, archiveDescription: String, sourceFile: String,
+                    transferListener: (DataTransferEventType, String, Option[Int]) => Unit): Future[Archive] = {
+    val awsListener = awsUploadProgressListener((new File(sourceFile)).length.toDouble, 5, transferListener)
+    val atm = new ArchiveTransferManager(client, credentials)
+    val archivePromise = Promise[Archive]()
+    Try(atm.upload("-", vaultName, archiveDescription, new File(sourceFile), awsListener)) match {
+      case Success(r) =>
+        val archive = Archive(r.getArchiveId, Some(sourceFile), None, Some(archiveDescription))
+        catAddArchive(vaultName, archive)
+        archivePromise.success(archive)
+      case Failure(ex) =>
+        archivePromise.failure(ex)
+    }
+    archivePromise.future
   }
 
   def deleteArchive(vaultName: String, archiveId: String) = {
@@ -229,7 +240,7 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
     sns.setRegion(region)
 
     val atm = new ArchiveTransferManager(client, sqs, sns)
-    val lsnr = new ProgressListener {
+    val lsnr = new AWSProgressListener {
       def progressChanged(ev: ProgressEvent): Unit = ev.getEventType match {
         case TRANSFER_COMPLETED_EVENT =>
           println(s"archive download completed: $archiveId")
