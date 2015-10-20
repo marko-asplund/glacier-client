@@ -2,6 +2,7 @@ package fi.markoa.glacier
 
 import java.time.ZonedDateTime
 import java.io.{InputStream, File, FileWriter}
+import java.util.concurrent.atomic.{AtomicInteger, AtomicLong, AtomicBoolean}
 import scala.concurrent.{Promise, Await}
 import scala.concurrent.duration._
 import scala.util.{Try, Success, Failure}
@@ -175,15 +176,30 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
 
   // ========= Glacier archive management =========
 
-  // TODO: return Future[Archive]
-  def uploadArchive(vaultName: String, archiveDescription: String, sourceFile: String) = {
+  // TODO: return Future[Archive] ?
+  def uploadArchive(vaultName: String, archiveDescription: String, sourceFile: String): Archive = {
     import ProgressEventType._
     val atm = new ArchiveTransferManager(client, credentials)
     val archive = Promise[Archive]()
-    val lsnr = new ProgressListener {
+    val lsnr = new AWSProgressListener {
+      val bytesToSend = (new File(sourceFile)).length.toDouble
+      val bytesSent = new AtomicLong
+      val prevPctMark = new AtomicInteger
+      val transferStarted = new AtomicBoolean
+      val tick = 5
       def getArchive = Await.result(archive.future, Duration(2, "seconds"))
       def progressChanged(ev: ProgressEvent): Unit = ev.getEventType match {
-        case REQUEST_BYTE_TRANSFER_EVENT => print("*")
+        case HTTP_REQUEST_CONTENT_RESET_EVENT =>
+          transferStarted.compareAndSet(false, true)
+        case REQUEST_BYTE_TRANSFER_EVENT =>
+          if (transferStarted.get) {
+            val s = bytesSent.addAndGet(ev.getBytesTransferred)
+            val pct = ((s/bytesToSend)*100).toInt
+            if ( (pct/tick) > prevPctMark.get) {
+              prevPctMark.set(pct/tick)
+              println(s"upload progress: $pct%");
+            }
+          }
         case TRANSFER_COMPLETED_EVENT =>
           catAddArchive(vaultName, getArchive)
           println(s"\narchive upload completed: ${getArchive.id}")
