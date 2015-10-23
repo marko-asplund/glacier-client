@@ -188,17 +188,21 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
     new AWSProgressListener {
       val bytesTransferred = new AtomicLong
       val prevPctMark = new AtomicInteger
-      val transferStarted = new AtomicBoolean
+      val transferring = new AtomicBoolean
       def progressChanged(ev: ProgressEvent): Unit = ev.getEventType match {
-        case HTTP_REQUEST_CONTENT_RESET_EVENT => transferStarted.compareAndSet(false, true)
-        case REQUEST_BYTE_TRANSFER_EVENT => if (transferStarted.get) {
+        case REQUEST_CONTENT_LENGTH_EVENT =>
+        case HTTP_REQUEST_STARTED_EVENT => transferring.compareAndSet(false, true)
+        case HTTP_RESPONSE_COMPLETED_EVENT => transferring.compareAndSet(true, false)
+        case HTTP_REQUEST_CONTENT_RESET_EVENT => bytesTransferred.addAndGet(ev.getBytesTransferred)
+        case REQUEST_BYTE_TRANSFER_EVENT =>
           val s = bytesTransferred.addAndGet(ev.getBytesTransferred)
-          val pct = ((s/bytesToTransfer)*100).toInt
-          if ( (pct/tickInterval) > prevPctMark.get) {
-            prevPctMark.set(pct/tickInterval)
-            listener(TransferProgress, s"transfer progress: $pct%", Some(pct))
+          if (transferring.get) {
+            val pct = ((s/bytesToTransfer)*100).toInt
+            if ( (pct/tickInterval) > prevPctMark.get) {
+              prevPctMark.set(pct/tickInterval)
+              listener(TransferProgress, s"transfer progress: $pct% # ${ev.getBytesTransferred}, ${bytesTransferred.get}", Some(pct))
+            }
           }
-        }
         case TRANSFER_COMPLETED_EVENT => listener(TransferCompleted, s"transfer completed", None)
         case TRANSFER_CANCELED_EVENT => listener(TransferCanceled, s"transfer canceled", None)
         case TRANSFER_FAILED_EVENT => listener(TransferFailed, s"transfer failed", None)
