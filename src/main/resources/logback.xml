@@ -1,5 +1,5 @@
 <configuration>
-  <property name="logPattern" value="%r %msg%n" />
+  <property name="logPattern" value="%d{yyyy-MM-dd HH:mm:ss.SSS} - %msg%n" />
 
   <appender name="stdout" class="ch.qos.logback.core.ConsoleAppender">
     <encoder>
@@ -9,7 +9,7 @@
 
   <appender name="file" class="ch.qos.logback.core.FileAppender">
     <file>glacier.log</file>
-    <append>false</append>
+    <append>true</append>
     <encoder>
       <pattern>${logPattern}</pattern>
     </encoder>

@@ -31,8 +31,8 @@ case class JobOutput(archiveDescription: String, contentType: String, checksum: 
 
 case class Archive(id: String, location: Option[String], checksum: Option[String], description: Option[String])
 
-case class AmInventory(vaultARN: String, inventoryDate: ZonedDateTime, archives: List[AmArchive])
-case class AmArchive(id: String, description: String, created: ZonedDateTime, size: Long, treeHash: String)
+case class AWSInventory(vaultARN: String, inventoryDate: ZonedDateTime, archives: List[AWSArchive])
+case class AWSArchive(id: String, description: String, created: ZonedDateTime, size: Long, treeHash: String)
 
 object DateTimeOrdering extends Ordering[ZonedDateTime] {
   def compare(a: ZonedDateTime, b: ZonedDateTime) = a compareTo b
@@ -61,7 +61,7 @@ object Converters {
   def asArchive(a: UploadArchiveResult) =
     Archive(a.getArchiveId, Some(a.getLocation), Some(a.getChecksum), None)
 
-  def fromAmArchive(am: AmArchive) = Archive(am.id, None, Some(am.treeHash), Some(am.description))
+  def fromAWSArchive(am: AWSArchive) = Archive(am.id, None, Some(am.treeHash), Some(am.description))
 
   implicit def ArchiveCodecJson = 
     casecodec4(Archive.apply, Archive.unapply)("archiveId", "location", "checksum", "description")
@@ -70,11 +70,11 @@ object Converters {
     (d: ZonedDateTime) => jString(d.toString),
     c => for (s <- c.as[String]) yield ZonedDateTime.parse(s)
   )
-  implicit def AmArchiveCodecJson =
-    casecodec5(AmArchive.apply, AmArchive.unapply)("ArchiveId", "ArchiveDescription", "CreationDate",
+  implicit def AWSArchiveCodecJson =
+    casecodec5(AWSArchive.apply, AWSArchive.unapply)("ArchiveId", "ArchiveDescription", "CreationDate",
       "Size", "SHA256TreeHash")
-  implicit def AmInventoryCodecJson =
-    casecodec3(AmInventory.apply, AmInventory.unapply)("VaultARN", "InventoryDate", "ArchiveList")
+  implicit def AWSInventoryCodecJson =
+    casecodec3(AWSInventory.apply, AWSInventory.unapply)("VaultARN", "InventoryDate", "ArchiveList")
 }
 
 class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
@@ -139,9 +139,12 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
   //https://docs.aws.amazon.com/amazonglacier/latest/dev/retrieving-vault-inventory-java.html
 
   def requestInventory(vaultName: String): Option[String] =
-    Try(client.initiateJob(new InitiateJobRequest(vaultName, new JobParameters().withType("inventory-retrieval"))).getJobId) match {
+    initiateJob(vaultName, new JobParameters().withType("inventory-retrieval"))
+
+  private def initiateJob(vaultName: String, jobParams: JobParameters): Option[String] =
+    Try(client.initiateJob(new InitiateJobRequest(vaultName, jobParams)).getJobId) match {
       case Success(jobId: String) => Some(jobId)
-      case Failure(ex) => { logger.error(s"failed to get inventory for vault ${vaultName}", ex); None }
+      case Failure(ex) => { logger.error(s"failed to initiate job ${jobParams.getType} for vault ${vaultName}", ex); None }
     }
 
   def listJobs(vaultName: String) =
@@ -149,15 +152,15 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
 
   def retrieveInventory(vaultName: String, jobId: String) = {
     val o = getJobOutput(vaultName, jobId)
-    val i = Parse.decodeOption[AmInventory](Source.fromInputStream(o.output).mkString)
+    val i = Parse.decodeOption[AWSInventory](Source.fromInputStream(o.output).mkString)
     o.output.close
     i
   }
 
   def getLatestVaultInventory(vaultName: String) =
     listJobs(vaultName).filter(j => j.completionDate.isDefined && j.statusCode == "Succeeded").
-      sortBy(_.completionDate.get).toList match {
-        case h :: t => retrieveInventory(vaultName, h.id)
+      sortBy(_.completionDate.get) match {
+        case h +: t => retrieveInventory(vaultName, h.id)
         case _ => None
       }
 
@@ -171,7 +174,7 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
   }
 
   def synchronizeLocalCatalog(vaultName: String) = getLatestVaultInventory(vaultName) match {
-    case Some(i) => i.archives.map(a => fromAmArchive(a)).foreach(a => catAddArchive(vaultName, a))
+    case Some(i) => i.archives.map(a => fromAWSArchive(a)).foreach(a => catAddArchive(vaultName, a))
     case _ =>
   }
 
@@ -182,8 +185,8 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
   // ========= Glacier archive management =========
 
   import DataTransferEventType._
-  def awsUploadProgressListener(bytesToTransfer: Double, tickInterval: Int,
-                                  listener: (DataTransferEventType, String, Option[Int]) => Unit) = {
+  private def awsUploadProgressListener(bytesToTransfer: Double, tickInterval: Int,
+                                        listener: (DataTransferEventType, String, Option[Int]) => Unit) = {
     import ProgressEventType._
     new AWSProgressListener {
       val bytesTransferred = new AtomicLong
@@ -200,7 +203,7 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
             val pct = ((s/bytesToTransfer)*100).toInt
             if ( (pct/tickInterval) > prevPctMark.get) {
               prevPctMark.set(pct/tickInterval)
-              listener(TransferProgress, s"transfer progress: $pct% # ${ev.getBytesTransferred}, ${bytesTransferred.get}", Some(pct))
+              listener(TransferProgress, s"transfer progress: $pct% (bytes: ${bytesTransferred.get})", Some(pct))
             }
           }
         case TRANSFER_COMPLETED_EVENT => listener(TransferCompleted, s"transfer completed", None)
@@ -237,25 +240,37 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
   }
 
   def downloadArchive(vaultName: String, archiveId: String, targetFile: String) = {
-    import ProgressEventType._
     val sqs = new AmazonSQSClient(credentials)
     sqs.setRegion(region)
     val sns = new AmazonSNSClient(credentials)
     sns.setRegion(region)
 
     val atm = new ArchiveTransferManager(client, sqs, sns)
-    val lsnr = new AWSProgressListener {
+    atm.download("-", vaultName, archiveId, new File(targetFile), awsDownloadProgressListener("archive", archiveId))
+  }
+
+  private def awsDownloadProgressListener(objType: String, objId: String): AWSProgressListener = {
+    import ProgressEventType._
+    new AWSProgressListener {
       def progressChanged(ev: ProgressEvent): Unit = ev.getEventType match {
+        case REQUEST_BYTE_TRANSFER_EVENT =>
         case TRANSFER_COMPLETED_EVENT =>
-          println(s"archive download completed: $archiveId")
+          println(s"$objType download completed: $objId")
         case TRANSFER_CANCELED_EVENT =>
-          println(s"archive download canceled: $archiveId")
+          println(s"$objType download canceled: $objId")
         case TRANSFER_FAILED_EVENT =>
-          println(s"archive download failed: $archiveId")
-        case _ =>
+          println(s"$objType download failed: $objId")
+        case _ => println(s"ev: $ev")
       }
     }
-    atm.download("-", vaultName, archiveId, new File(targetFile), lsnr)
+  }
+
+  def requestArchiveRetrieval(vaultName: String, archiveId: String): Option[String] =
+    initiateJob(vaultName, new JobParameters().withType("archive-retrieval").withArchiveId(archiveId))
+
+  def downloadJobOutput(vaultName: String, jobId: String, targetFile: String): Unit = {
+    val atm = new ArchiveTransferManager(client, credentials)
+    atm.downloadJobOutput("-", vaultName, jobId, new File(targetFile), awsDownloadProgressListener("jobOutput", jobId))
   }
 
   // ========= other =========
