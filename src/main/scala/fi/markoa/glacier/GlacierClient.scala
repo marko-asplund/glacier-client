@@ -117,17 +117,18 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
   // ========= local archive catalog management =========
 
   def catListArchives(vaultName: String): Seq[Archive] = {
-    val d = new File(homeDir, b64enc.encodeToString(vaultName.getBytes))
-    d.list.flatMap { i =>
+    val d = getVaultDir(region, vaultName)
+    Option(d.list).getOrElse(Array.empty).flatMap { i =>
       Parse.decodeOption[Archive](Source.fromFile(new File(d, i)).mkString)
     }
   }
 
-  private def getVaultDir(vaultName: String) = new File(homeDir, b64enc.encodeToString(vaultName.getBytes))
+  private def getVaultDir(cRegion: Region, vaultName: String) =
+    new File(new File(homeDir, cRegion.toString), b64enc.encodeToString(vaultName.getBytes))
   private def getArchiveFile(vaultDir: File, archiveId: String) = new File(vaultDir, archiveId.substring(0, 20))
 
   def catAddArchive(vaultName: String, arch: Archive): Boolean = {
-    val d = getVaultDir(vaultName)
+    val d = getVaultDir(region, vaultName)
     d.mkdirs
     val f = getArchiveFile(d, arch.id)
     Try {
@@ -140,10 +141,8 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
     }
   }
 
-  def catDeleteArchive(vaultName: String, archiveId: String): Boolean = {
-    val f = new File(new File(homeDir, b64enc.encodeToString(vaultName.getBytes)), archiveId.substring(0, 20))
-    f.delete
-  }
+  def catDeleteArchive(vaultName: String, archiveId: String): Boolean =
+    getArchiveFile(getVaultDir(region, vaultName), archiveId).delete
 
   // ========= Glacier archive inventory management =========
   //https://docs.aws.amazon.com/amazonglacier/latest/dev/retrieving-vault-inventory-java.html
@@ -291,5 +290,6 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
 object GlacierClient {
   def apply(region: Regions, credentials: AWSCredentialsProvider) = new GlacierClient(region, credentials)
   def apply(region: Regions): GlacierClient = apply(region, new ProfileCredentialsProvider)
-  def apply(): GlacierClient = apply(Regions.EU_CENTRAL_1)
+  def apply(region: String): GlacierClient = apply(Regions.valueOf(region))
+  def apply(): GlacierClient = apply(Regions.EU_WEST_1)
 }
