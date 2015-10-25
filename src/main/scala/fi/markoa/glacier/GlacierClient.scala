@@ -99,14 +99,20 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
 
   // ========= vault management =========
 
-  def describeVault(vaultName: String) = vaultResultasVault(client.describeVault(new DescribeVaultRequest(vaultName)))
+  def describeVault(vaultName: String): Vault = vaultResultasVault(client.describeVault(new DescribeVaultRequest(vaultName)))
 
-  def createVault(vaultName: String) = client.createVault(new CreateVaultRequest(vaultName)).getLocation
+  def createVault(vaultName: String): String = {
+    val location = client.createVault(new CreateVaultRequest(vaultName)).getLocation
+    logger.info(s"vault created: $vaultName, $location")
+    location
+  }
 
   def listVaults: Seq[Vault] = client.listVaults(new ListVaultsRequest).getVaultList.map(asVault)
 
-  def deleteVault(vaultName: String) = client.deleteVault(new DeleteVaultRequest(vaultName))
-
+  def deleteVault(vaultName: String): Unit = {
+    client.deleteVault(new DeleteVaultRequest(vaultName))
+    logger.info(s"vault deleted: $vaultName")
+  }
 
   // ========= local archive catalog management =========
 
@@ -178,7 +184,9 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
   }
 
   def synchronizeLocalCatalog(vaultName: String) = getLatestVaultInventory(vaultName) match {
-    case Some(i) => i.archives.map(a => fromAWSArchive(a)).foreach(a => catAddArchive(vaultName, a))
+    case Some(i) =>
+      i.archives.map(a => fromAWSArchive(a)).foreach(a => catAddArchive(vaultName, a))
+      logger.info(s"local $vaultName catalog synchronized, inventory date: date: ${i.inventoryDate}")
     case _ =>
   }
 
@@ -229,10 +237,12 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
     val archivePromise = Promise[Archive]()
     Try(atm.upload("-", vaultName, archiveDescription, new File(sourceFile), awsListener)) match {
       case Success(r) =>
+        logger.info(s"archive uploaded: $vaultName, ${r.getArchiveId}")
         val archive = Archive(r.getArchiveId, Some(sourceFile), None, Some(archiveDescription))
         catAddArchive(vaultName, archive)
         archivePromise.success(archive)
       case Failure(ex) =>
+        logger.error("archive upload failed: $vaultName: ${ex}", ex)
         archivePromise.failure(ex)
     }
     archivePromise.future
@@ -240,6 +250,7 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
 
   def deleteArchive(vaultName: String, archiveId: String): Boolean = {
     client.deleteArchive(new DeleteArchiveRequest(vaultName, archiveId))
+    logger.info(s"archive deleted: $vaultName, $archiveId")
     catDeleteArchive(vaultName, archiveId)
   }
 
