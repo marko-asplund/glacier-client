@@ -84,7 +84,11 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
 
   val region = Region.getRegion(regionName)
   val client = new AmazonGlacierClient(credentials)
+  val sqs = new AmazonSQSClient(credentials)
+  val sns = new AmazonSNSClient(credentials)
   client.setRegion(region)
+  sqs.setRegion(region)
+  sns.setRegion(region)
 
   val b64enc = java.util.Base64.getEncoder
   val b64dec = java.util.Base64.getDecoder
@@ -106,11 +110,11 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
 
   // ========= local archive catalog management =========
 
-  def catListArchives(vaultName: String): List[Archive] = {
+  def catListArchives(vaultName: String): Seq[Archive] = {
     val d = new File(homeDir, b64enc.encodeToString(vaultName.getBytes))
     d.list.flatMap { i =>
       Parse.decodeOption[Archive](Source.fromFile(new File(d, i)).mkString)
-    }.toList
+    }
   }
 
   private def getVaultDir(vaultName: String) = new File(homeDir, b64enc.encodeToString(vaultName.getBytes))
@@ -147,24 +151,24 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
       case Failure(ex) => { logger.error(s"failed to initiate job ${jobParams.getType} for vault ${vaultName}", ex); None }
     }
 
-  def listJobs(vaultName: String) =
+  def listJobs(vaultName: String): Seq[Job] =
     client.listJobs(new ListJobsRequest(vaultName)).getJobList.map(asJob)
 
-  def retrieveInventory(vaultName: String, jobId: String) = {
+  def retrieveInventory(vaultName: String, jobId: String): Option[AWSInventory] = {
     val o = getJobOutput(vaultName, jobId)
     val i = Parse.decodeOption[AWSInventory](Source.fromInputStream(o.output).mkString)
     o.output.close
     i
   }
 
-  def getLatestVaultInventory(vaultName: String) =
+  def getLatestVaultInventory(vaultName: String): Option[AWSInventory] =
     listJobs(vaultName).filter(j => j.completionDate.isDefined && j.statusCode == "Succeeded").
       sortBy(_.completionDate.get) match {
         case h +: t => retrieveInventory(vaultName, h.id)
         case _ => None
       }
 
-  def getJobOutputToFile(vaultName: String, jobId: String, targetFile: String) = {
+  def getJobOutputToFile(vaultName: String, jobId: String, targetFile: String): JobOutput = {
     val o = getJobOutput(vaultName, jobId)
     val w = new FileWriter(targetFile)
     w.write(Source.fromInputStream(o.output).mkString)
@@ -178,7 +182,7 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
     case _ =>
   }
 
-  private def getJobOutput(vaultName: String, jobId: String) =
+  private def getJobOutput(vaultName: String, jobId: String): JobOutput =
     asJobOutput(client.getJobOutput(new GetJobOutputRequest().withVaultName(vaultName).withJobId(jobId)))
 
 
@@ -186,7 +190,7 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
 
   import DataTransferEventType._
   private def awsUploadProgressListener(bytesToTransfer: Double, tickInterval: Int,
-                                        listener: (DataTransferEventType, String, Option[Int]) => Unit) = {
+                 listener: (DataTransferEventType, String, Option[Int]) => Unit): AWSProgressListener = {
     import ProgressEventType._
     new AWSProgressListener {
       val bytesTransferred = new AtomicLong
@@ -234,21 +238,16 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
     archivePromise.future
   }
 
-  def deleteArchive(vaultName: String, archiveId: String) = {
+  def deleteArchive(vaultName: String, archiveId: String): Boolean = {
     client.deleteArchive(new DeleteArchiveRequest(vaultName, archiveId))
     catDeleteArchive(vaultName, archiveId)
   }
 
-  def downloadArchive(vaultName: String, archiveId: String, targetFile: String) = {
-    val sqs = new AmazonSQSClient(credentials)
-    sqs.setRegion(region)
-    val sns = new AmazonSNSClient(credentials)
-    sns.setRegion(region)
+  def downloadArchive(vaultName: String, archiveId: String, targetFile: String): Unit =
+    new ArchiveTransferManager(client, sqs, sns).
+      download("-", vaultName, archiveId, new File(targetFile), awsDownloadProgressListener("archive", archiveId))
 
-    val atm = new ArchiveTransferManager(client, sqs, sns)
-    atm.download("-", vaultName, archiveId, new File(targetFile), awsDownloadProgressListener("archive", archiveId))
-  }
-
+  // merge with awsUploadProgressListener ?
   private def awsDownloadProgressListener(objType: String, objId: String): AWSProgressListener = {
     import ProgressEventType._
     new AWSProgressListener {
@@ -260,7 +259,7 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
           println(s"$objType download canceled: $objId")
         case TRANSFER_FAILED_EVENT =>
           println(s"$objType download failed: $objId")
-        case _ => println(s"ev: $ev")
+        case _ => println(s"ev: $ev") // debugging
       }
     }
   }
@@ -268,10 +267,9 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
   def requestArchiveRetrieval(vaultName: String, archiveId: String): Option[String] =
     initiateJob(vaultName, new JobParameters().withType("archive-retrieval").withArchiveId(archiveId))
 
-  def downloadJobOutput(vaultName: String, jobId: String, targetFile: String): Unit = {
-    val atm = new ArchiveTransferManager(client, credentials)
-    atm.downloadJobOutput("-", vaultName, jobId, new File(targetFile), awsDownloadProgressListener("jobOutput", jobId))
-  }
+  def downloadJobOutput(vaultName: String, jobId: String, targetFile: String): Unit =
+    new ArchiveTransferManager(client, sqs, sns).
+      downloadJobOutput("-", vaultName, jobId, new File(targetFile), awsDownloadProgressListener("jobOutput", jobId))
 
   // ========= other =========
 
@@ -281,5 +279,6 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
 
 object GlacierClient {
   def apply(region: Regions, credentials: AWSCredentialsProvider) = new GlacierClient(region, credentials)
-  def apply() = new GlacierClient(Regions.EU_CENTRAL_1, new ProfileCredentialsProvider)
+  def apply(region: Regions): GlacierClient = apply(region, new ProfileCredentialsProvider)
+  def apply(): GlacierClient = apply(Regions.EU_CENTRAL_1)
 }
