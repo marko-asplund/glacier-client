@@ -167,7 +167,8 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
   }
 
   def getLatestVaultInventory(vaultName: String): Option[AWSInventory] =
-    listJobs(vaultName).filter(j => j.completionDate.isDefined && j.statusCode == "Succeeded").
+    listJobs(vaultName).filter(j => j.action == "InventoryRetrieval" &&
+                                 j.completionDate.isDefined && j.statusCode == "Succeeded").
       sortBy(_.completionDate.get) match {
         case h +: t => retrieveInventory(vaultName, h.id)
         case _ => None
@@ -288,8 +289,8 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
 }
 
 object GlacierClient {
+  def regions = Regions.values
   def apply(region: Regions, credentials: AWSCredentialsProvider) = new GlacierClient(region, credentials)
   def apply(region: Regions): GlacierClient = apply(region, new ProfileCredentialsProvider)
-  def apply(region: String): GlacierClient = apply(Regions.valueOf(region))
-  def apply(): GlacierClient = apply(Regions.EU_WEST_1)
+  def apply(region: String): GlacierClient = apply(Regions.fromName(region))
 }
