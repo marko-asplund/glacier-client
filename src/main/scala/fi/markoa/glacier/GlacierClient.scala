@@ -16,23 +16,24 @@ import com.amazonaws.auth.profile.ProfileCredentialsProvider
 import com.amazonaws.services.glacier.AmazonGlacierClient
 import com.amazonaws.services.glacier.model._
 import com.amazonaws.services.glacier.transfer.ArchiveTransferManager
+import com.amazonaws.services.glacier.TreeHashGenerator
 import com.amazonaws.services.sns.AmazonSNSClient
 import com.amazonaws.services.sqs.AmazonSQSClient
 import com.amazonaws.event.{ProgressListener => AWSProgressListener, ProgressEvent, ProgressEventType}
 import argonaut._, Argonaut._
 
-case class Vault(creationDate: ZonedDateTime, lastInventoryDate: Option[ZonedDateTime],
-                 numberOfArchives: Long, sizeInBytes: Long, vaultARN: String,
-                 vaultName: String)
+case class Vault(vaultARN: String, vaultName: String,
+                 creationDate: ZonedDateTime, lastInventoryDate: Option[ZonedDateTime],
+                 numberOfArchives: Long, sizeInBytes: Long)
 
 case class Job(id: String, vaultARN: String, action: String, description: String, creationDate: ZonedDateTime, statusCode: String, statusMessage: String, completionDate: Option[ZonedDateTime], archiveId: Option[String])
 
 case class JobOutput(archiveDescription: String, contentType: String, checksum: String, status: Int, output: InputStream)
 
-case class Archive(id: String, location: Option[String], checksum: Option[String], description: Option[String])
+case class Archive(id: String, location: Option[String], sha256TreeHash: String, size: Long, description: Option[String])
 
 case class AWSInventory(vaultARN: String, inventoryDate: ZonedDateTime, archives: List[AWSArchive])
-case class AWSArchive(id: String, description: String, created: ZonedDateTime, size: Long, treeHash: String)
+case class AWSArchive(id: String, description: String, created: ZonedDateTime, size: Long, sha256TreeHash: String)
 
 object DateTimeOrdering extends Ordering[ZonedDateTime] {
   def compare(a: ZonedDateTime, b: ZonedDateTime) = a compareTo b
@@ -44,13 +45,13 @@ object DataTransferEventType extends Enumeration {
 }
 
 object Converters {
-  def parseOptDate(ds: String) = Option(ds).map(ZonedDateTime.parse(_))
+  def parseOptDate(ds: String) = Option(ds).map(ZonedDateTime.parse)
 
   def asVault(v: DescribeVaultOutput) =
-    Vault(ZonedDateTime.parse(v.getCreationDate), parseOptDate(v.getLastInventoryDate), v.getNumberOfArchives, v.getSizeInBytes, v.getVaultARN, v.getVaultName)
+    Vault(v.getVaultARN, v.getVaultName, ZonedDateTime.parse(v.getCreationDate), parseOptDate(v.getLastInventoryDate), v.getNumberOfArchives, v.getSizeInBytes)
 
   def vaultResultasVault(v: DescribeVaultResult) =
-    Vault(ZonedDateTime.parse(v.getCreationDate), parseOptDate(v.getLastInventoryDate), v.getNumberOfArchives, v.getSizeInBytes, v.getVaultARN, v.getVaultName)
+    Vault(v.getVaultARN, v.getVaultName, ZonedDateTime.parse(v.getCreationDate), parseOptDate(v.getLastInventoryDate), v.getNumberOfArchives, v.getSizeInBytes)
 
   def asJob(j: GlacierJobDescription) =
     Job(j.getJobId, j.getVaultARN, j.getAction, j.getJobDescription, ZonedDateTime.parse(j.getCreationDate), j.getStatusCode, j.getStatusMessage, parseOptDate(j.getCompletionDate), Option(j.getArchiveId))
@@ -58,13 +59,10 @@ object Converters {
   def asJobOutput(o: GetJobOutputResult) =
     JobOutput(o.getArchiveDescription, o.getContentType, o.getChecksum, o.getStatus, o.getBody)
 
-  def asArchive(a: UploadArchiveResult) =
-    Archive(a.getArchiveId, Some(a.getLocation), Some(a.getChecksum), None)
-
-  def fromAWSArchive(am: AWSArchive) = Archive(am.id, None, Some(am.treeHash), Some(am.description))
+  def fromAWSArchive(am: AWSArchive) = Archive(am.id, None, am.sha256TreeHash, am.size, Some(am.description))
 
   implicit def ArchiveCodecJson = 
-    casecodec4(Archive.apply, Archive.unapply)("archiveId", "location", "checksum", "description")
+    casecodec5(Archive.apply, Archive.unapply)("archiveId", "location", "sha256TreeHash", "size", "description")
 
   implicit def DateTimeCodecJson: CodecJson[ZonedDateTime] = CodecJson(
     (d: ZonedDateTime) => jString(d.toString),
@@ -161,7 +159,8 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
 
   def retrieveInventory(vaultName: String, jobId: String): Option[AWSInventory] = {
     val o = getJobOutput(vaultName, jobId)
-    val i = Parse.decodeOption[AWSInventory](Source.fromInputStream(o.output).mkString)
+    val json = Source.fromInputStream(o.output).mkString
+    val i = Parse.decodeOption[AWSInventory](json)
     o.output.close
     i
   }
@@ -201,9 +200,7 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
                  listener: (DataTransferEventType, String, Option[Int]) => Unit): AWSProgressListener = {
     import ProgressEventType._
     new AWSProgressListener {
-      val bytesTransferred = new AtomicLong
-      val prevPctMark = new AtomicInteger
-      val transferring = new AtomicBoolean
+      val (bytesTransferred, prevPctMark, transferring) = (new AtomicLong, new AtomicInteger, new AtomicBoolean)
       def progressChanged(ev: ProgressEvent): Unit = ev.getEventType match {
         case REQUEST_CONTENT_LENGTH_EVENT =>
         case HTTP_REQUEST_STARTED_EVENT => transferring.compareAndSet(false, true)
@@ -230,15 +227,17 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
     Await.result(uploadArchive(vaultName, archiveDescription, sourceFile,
                   (evType: DataTransferEventType, msg: String, pct: Option[Int]) => println(s"$msg")), Duration.Inf)
 
-  def uploadArchive(vaultName: String, archiveDescription: String, sourceFile: String,
+  def uploadArchive(vaultName: String, archiveDescription: String, sourceFileName: String,
                     transferListener: (DataTransferEventType, String, Option[Int]) => Unit): Future[Archive] = {
-    val awsListener = awsUploadProgressListener((new File(sourceFile)).length.toDouble, 5, transferListener)
+    val sourceFile = new File(sourceFileName)
+    val hash = TreeHashGenerator.calculateTreeHash(sourceFile)
+    val awsListener = awsUploadProgressListener(sourceFile.length.toDouble, 5, transferListener)
     val atm = new ArchiveTransferManager(client, credentials)
     val archivePromise = Promise[Archive]()
-    Try(atm.upload("-", vaultName, archiveDescription, new File(sourceFile), awsListener)) match {
+    Try(atm.upload("-", vaultName, archiveDescription, sourceFile, awsListener)) match {
       case Success(r) =>
         logger.info(s"archive uploaded: $vaultName, ${r.getArchiveId}")
-        val archive = Archive(r.getArchiveId, Some(sourceFile), None, Some(archiveDescription))
+        val archive = Archive(r.getArchiveId, Some(sourceFileName), hash, sourceFile.length, Some(archiveDescription))
         catAddArchive(vaultName, archive)
         archivePromise.success(archive)
       case Failure(ex) =>
