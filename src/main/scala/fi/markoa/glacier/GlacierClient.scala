@@ -2,7 +2,9 @@ package fi.markoa.glacier
 
 import java.time.ZonedDateTime
 import java.io.{InputStream, File, FileWriter}
-import java.util.concurrent.atomic.{AtomicInteger, AtomicLong, AtomicBoolean}
+import java.util.concurrent.atomic.AtomicReference
+import com.amazonaws.event.ProgressEventType._
+
 import scala.concurrent.{Future, Promise, Await}
 import scala.concurrent.duration._
 import scala.util.{Try, Success, Failure}
@@ -11,22 +13,24 @@ import scala.io.Source
 import com.typesafe.scalalogging.Logger
 import org.slf4j.LoggerFactory
 import com.amazonaws.auth.AWSCredentialsProvider
-import com.amazonaws.regions.{Region, Regions}
 import com.amazonaws.auth.profile.ProfileCredentialsProvider
-import com.amazonaws.services.glacier.AmazonGlacierClient
-import com.amazonaws.services.glacier.model._
-import com.amazonaws.services.glacier.transfer.ArchiveTransferManager
-import com.amazonaws.services.glacier.TreeHashGenerator
+import com.amazonaws.event.{ProgressListener => AWSProgressListener, ProgressEvent, ProgressEventType}
+import com.amazonaws.regions.{Region, Regions}
 import com.amazonaws.services.sns.AmazonSNSClient
 import com.amazonaws.services.sqs.AmazonSQSClient
-import com.amazonaws.event.{ProgressListener => AWSProgressListener, ProgressEvent, ProgressEventType}
+import com.amazonaws.services.glacier.{AmazonGlacierClient, TreeHashGenerator}
+import com.amazonaws.services.glacier.model._
+import com.amazonaws.services.glacier.transfer.ArchiveTransferManager
 import argonaut._, Argonaut._
+
 
 case class Vault(vaultARN: String, vaultName: String,
                  creationDate: ZonedDateTime, lastInventoryDate: Option[ZonedDateTime],
                  numberOfArchives: Long, sizeInBytes: Long)
 
-case class Job(id: String, vaultARN: String, action: String, description: String, creationDate: ZonedDateTime, statusCode: String, statusMessage: String, completionDate: Option[ZonedDateTime], archiveId: Option[String])
+case class Job(id: String, vaultARN: String, action: String, description: String, creationDate: ZonedDateTime,
+               statusCode: String, statusMessage: String, completionDate: Option[ZonedDateTime],
+               archiveId: Option[String])
 
 case class JobOutput(archiveDescription: String, contentType: String, checksum: String, status: Int, output: InputStream)
 
@@ -47,32 +51,32 @@ object DataTransferEventType extends Enumeration {
 object Converters {
   def parseOptDate(ds: String) = Option(ds).map(ZonedDateTime.parse)
 
-  def asVault(v: DescribeVaultOutput) =
-    Vault(v.getVaultARN, v.getVaultName, ZonedDateTime.parse(v.getCreationDate), parseOptDate(v.getLastInventoryDate), v.getNumberOfArchives, v.getSizeInBytes)
+  def asVault(v: DescribeVaultOutput) = Vault(v.getVaultARN, v.getVaultName, ZonedDateTime.parse(v.getCreationDate),
+    parseOptDate(v.getLastInventoryDate), v.getNumberOfArchives, v.getSizeInBytes)
 
-  def vaultResultasVault(v: DescribeVaultResult) =
-    Vault(v.getVaultARN, v.getVaultName, ZonedDateTime.parse(v.getCreationDate), parseOptDate(v.getLastInventoryDate), v.getNumberOfArchives, v.getSizeInBytes)
+  def vaultResultasVault(v: DescribeVaultResult) = Vault(v.getVaultARN, v.getVaultName,
+    ZonedDateTime.parse(v.getCreationDate), parseOptDate(v.getLastInventoryDate), v.getNumberOfArchives, v.getSizeInBytes)
 
-  def asJob(j: GlacierJobDescription) =
-    Job(j.getJobId, j.getVaultARN, j.getAction, j.getJobDescription, ZonedDateTime.parse(j.getCreationDate), j.getStatusCode, j.getStatusMessage, parseOptDate(j.getCompletionDate), Option(j.getArchiveId))
+  def asJob(j: GlacierJobDescription) = Job(j.getJobId, j.getVaultARN, j.getAction, j.getJobDescription,
+    ZonedDateTime.parse(j.getCreationDate), j.getStatusCode, j.getStatusMessage, parseOptDate(j.getCompletionDate),
+    Option(j.getArchiveId))
 
-  def asJobOutput(o: GetJobOutputResult) =
-    JobOutput(o.getArchiveDescription, o.getContentType, o.getChecksum, o.getStatus, o.getBody)
+  def asJobOutput(o: GetJobOutputResult) = JobOutput(o.getArchiveDescription, o.getContentType, o.getChecksum,
+    o.getStatus, o.getBody)
 
   def fromAWSArchive(am: AWSArchive) = Archive(am.id, None, am.sha256TreeHash, am.size, Some(am.description))
 
-  implicit def ArchiveCodecJson = 
-    casecodec5(Archive.apply, Archive.unapply)("archiveId", "location", "sha256TreeHash", "size", "description")
+  implicit def ArchiveCodecJson = casecodec5(Archive.apply, Archive.unapply)("archiveId", "location", "sha256TreeHash",
+    "size", "description")
 
   implicit def DateTimeCodecJson: CodecJson[ZonedDateTime] = CodecJson(
     (d: ZonedDateTime) => jString(d.toString),
     c => for (s <- c.as[String]) yield ZonedDateTime.parse(s)
   )
-  implicit def AWSArchiveCodecJson =
-    casecodec5(AWSArchive.apply, AWSArchive.unapply)("ArchiveId", "ArchiveDescription", "CreationDate",
-      "Size", "SHA256TreeHash")
-  implicit def AWSInventoryCodecJson =
-    casecodec3(AWSInventory.apply, AWSInventory.unapply)("VaultARN", "InventoryDate", "ArchiveList")
+  implicit def AWSArchiveCodecJson = casecodec5(AWSArchive.apply, AWSArchive.unapply)("ArchiveId", "ArchiveDescription",
+    "CreationDate", "Size", "SHA256TreeHash")
+  implicit def AWSInventoryCodecJson = casecodec3(AWSInventory.apply, AWSInventory.unapply)("VaultARN", "InventoryDate",
+    "ArchiveList")
 }
 
 class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
@@ -195,46 +199,88 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
 
   // ========= Glacier archive management =========
 
-  import DataTransferEventType._
-  private def awsUploadProgressListener(bytesToTransfer: Double, tickInterval: Int,
-                 listener: (DataTransferEventType, String, Option[Int]) => Unit): AWSProgressListener = {
-    import ProgressEventType._
-    new AWSProgressListener {
-      val (bytesTransferred, prevPctMark, transferring) = (new AtomicLong, new AtomicInteger, new AtomicBoolean)
-      def progressChanged(ev: ProgressEvent): Unit = ev.getEventType match {
-        case REQUEST_CONTENT_LENGTH_EVENT =>
-        case HTTP_REQUEST_STARTED_EVENT => transferring.compareAndSet(false, true)
-        case HTTP_RESPONSE_COMPLETED_EVENT => transferring.compareAndSet(true, false)
-        case HTTP_REQUEST_CONTENT_RESET_EVENT => bytesTransferred.addAndGet(ev.getBytesTransferred)
-        case REQUEST_BYTE_TRANSFER_EVENT =>
-          val s = bytesTransferred.addAndGet(ev.getBytesTransferred)
-          if (transferring.get) {
-            val pct = ((s/bytesToTransfer)*100).toInt
-            if ( (pct/tickInterval) > prevPctMark.get) {
-              prevPctMark.set(pct/tickInterval)
-              listener(TransferProgress, s"transfer progress: $pct% (bytes: ${bytesTransferred.get})", Some(pct))
-            }
-          }
-        case TRANSFER_COMPLETED_EVENT => listener(TransferCompleted, s"transfer completed", None)
-        case TRANSFER_CANCELED_EVENT => listener(TransferCanceled, s"transfer canceled", None)
-        case TRANSFER_FAILED_EVENT => listener(TransferFailed, s"transfer failed", None)
-        case _ =>
+  object Progress {
+
+    import DataTransferEventType._
+
+    case class ArchiveTransferState(bytesToTransfer: Option[Long], transferring: Boolean = false,
+                                    bytesTransferred: Long = 0)
+
+    type TransferStateMachine = (ArchiveTransferState, ProgressEvent) => ArchiveTransferState
+    type TransferProgressReporter = (ArchiveTransferState, ProgressEvent, TransferEventListener) => Unit
+    type TransferEventListener = (DataTransferEventType, ArchiveTransferState, String) => Unit
+
+    def uploadStateMachine(state: ArchiveTransferState, event: ProgressEvent): ArchiveTransferState = {
+      event.getEventType match {
+        case HTTP_REQUEST_STARTED_EVENT => state.copy(transferring = true)
+        case HTTP_RESPONSE_COMPLETED_EVENT => state.copy(transferring = false)
+        case HTTP_REQUEST_CONTENT_RESET_EVENT =>
+          state.copy(bytesTransferred = state.bytesTransferred + event.getBytesTransferred)
+        case REQUEST_BYTE_TRANSFER_EVENT => state.copy(bytesTransferred =
+          state.bytesTransferred + event.getBytesTransferred)
+        case _ => state
       }
     }
+
+    def downloadStateMachine(state: ArchiveTransferState, event: ProgressEvent): ArchiveTransferState =
+      event.getEventType match {
+        case TRANSFER_STARTED_EVENT => state.copy(transferring = true)
+        case RESPONSE_BYTE_TRANSFER_EVENT => state.copy(bytesTransferred =
+          state.bytesTransferred + event.getBytesTransferred)
+        case _ => state
+      }
+
+    def bytesBasedProgressReporter(tickInterval: Int): TransferProgressReporter = {
+      var prevPctMark = 0
+
+      (state: ArchiveTransferState, event: ProgressEvent, listener: TransferEventListener) => {
+        if (state.bytesToTransfer.isDefined && state.transferring) {
+          val pct = ((state.bytesTransferred.toDouble / state.bytesToTransfer.get) * 100).toInt
+          if ((pct / tickInterval) > prevPctMark) {
+            prevPctMark = pct / tickInterval
+            listener(TransferProgress, state, s"transfer progress: $pct% (bytes: ${state.bytesTransferred})")
+          }
+        }
+      }
+    }
+
+    def timeBasedProgressReporter(): TransferProgressReporter = ???
+
+    def awsTransferProgressListenerAdapter(initialState: ArchiveTransferState, sm: TransferStateMachine,
+                                                   reporter: TransferProgressReporter,
+                                                   listener: TransferEventListener): AWSProgressListener =
+      new AWSProgressListener {
+        val state = new AtomicReference(initialState)
+
+        def progressChanged(ev: ProgressEvent): Unit = ev.getEventType match {
+          case TRANSFER_COMPLETED_EVENT => listener(TransferCompleted, state.get, s"transfer completed")
+          case TRANSFER_CANCELED_EVENT => listener(TransferCanceled, state.get, s"transfer canceled")
+          case TRANSFER_FAILED_EVENT => listener(TransferFailed, state.get, s"transfer failed")
+          case _ => val currState = state.get
+            val st = sm(currState, ev)
+            reporter(st, ev, listener)
+            state.compareAndSet(currState, st)
+        }
+      }
+
+    val printProgressListener = (evType: DataTransferEventType, state: ArchiveTransferState, msg: String) =>
+      println(s"$evType: $msg")
   }
 
+  import Progress._
+
   def uploadArchive(vaultName: String, archiveDescription: String, sourceFile: String): Archive =
-    Await.result(uploadArchive(vaultName, archiveDescription, sourceFile,
-                  (evType: DataTransferEventType, msg: String, pct: Option[Int]) => println(s"$msg")), Duration.Inf)
+    Await.result(uploadArchive(vaultName, archiveDescription, sourceFile, Progress.printProgressListener), Duration.Inf)
 
   def uploadArchive(vaultName: String, archiveDescription: String, sourceFileName: String,
-                    transferListener: (DataTransferEventType, String, Option[Int]) => Unit): Future[Archive] = {
+                    transferListener: Progress.TransferEventListener): Future[Archive] = {
     val sourceFile = new File(sourceFileName)
     val hash = TreeHashGenerator.calculateTreeHash(sourceFile)
-    val awsListener = awsUploadProgressListener(sourceFile.length.toDouble, 5, transferListener)
+    val progressListener = awsTransferProgressListenerAdapter(ArchiveTransferState(Some(sourceFile.length)),
+      uploadStateMachine, bytesBasedProgressReporter(5), printProgressListener)
     val atm = new ArchiveTransferManager(client, credentials)
     val archivePromise = Promise[Archive]()
-    Try(atm.upload("-", vaultName, archiveDescription, sourceFile, awsListener)) match {
+    Try(atm.upload("-", vaultName, archiveDescription, sourceFile, progressListener)) match {
       case Success(r) =>
         logger.info(s"archive uploaded: $vaultName, ${r.getArchiveId}")
         val archive = Archive(r.getArchiveId, Some(sourceFileName), hash, sourceFile.length, Some(archiveDescription))
@@ -253,33 +299,27 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
     catDeleteArchive(vaultName, archiveId)
   }
 
-  def downloadArchive(vaultName: String, archiveId: String, targetFile: String): Unit =
+  private val DefaultTickInterval = 5
+  def downloadArchive(vaultName: String, archiveId: String, targetFile: String): Unit = {
+    val archiveSize = catListArchives(vaultName).find(_.id == archiveId).map(_.size)
+    val progressListener = awsTransferProgressListenerAdapter(ArchiveTransferState(archiveSize), downloadStateMachine,
+      bytesBasedProgressReporter(DefaultTickInterval), printProgressListener)
     new ArchiveTransferManager(client, sqs, sns).
-      download("-", vaultName, archiveId, new File(targetFile), awsDownloadProgressListener("archive", archiveId))
-
-  // merge with awsUploadProgressListener ?
-  private def awsDownloadProgressListener(objType: String, objId: String): AWSProgressListener = {
-    import ProgressEventType._
-    new AWSProgressListener {
-      def progressChanged(ev: ProgressEvent): Unit = ev.getEventType match {
-        case REQUEST_BYTE_TRANSFER_EVENT =>
-        case TRANSFER_COMPLETED_EVENT =>
-          println(s"$objType download completed: $objId")
-        case TRANSFER_CANCELED_EVENT =>
-          println(s"$objType download canceled: $objId")
-        case TRANSFER_FAILED_EVENT =>
-          println(s"$objType download failed: $objId")
-        case _ => println(s"ev: $ev") // debugging
-      }
-    }
+      download("-", vaultName, archiveId, new File(targetFile), progressListener)
   }
 
-  def requestArchiveRetrieval(vaultName: String, archiveId: String): Option[String] =
+  def prepareArchiveRetrieval(vaultName: String, archiveId: String): Option[String] =
     initiateJob(vaultName, new JobParameters().withType("archive-retrieval").withArchiveId(archiveId))
 
-  def downloadJobOutput(vaultName: String, jobId: String, targetFile: String): Unit =
+  def downloadPreparedArchive(vaultName: String, jobId: String, targetFile: String): Unit = {
+    val archive = listJobs(vaultName).filter(_.action == "ArchiveRetrieval").find(_.id == jobId) flatMap ( j =>
+      catListArchives(vaultName).find(_.id == j.archiveId.get)
+    )
+    val progressListener = awsTransferProgressListenerAdapter(ArchiveTransferState(archive.map(_.size)), downloadStateMachine,
+      bytesBasedProgressReporter(DefaultTickInterval), printProgressListener)
     new ArchiveTransferManager(client, sqs, sns).
-      downloadJobOutput("-", vaultName, jobId, new File(targetFile), awsDownloadProgressListener("jobOutput", jobId))
+      downloadJobOutput("-", vaultName, jobId, new File(targetFile), progressListener)
+  }
 
   // ========= other =========
 
