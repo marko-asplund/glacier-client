@@ -1,8 +1,10 @@
 package fi.markoa.glacier
 
-import java.time.ZonedDateTime
+import java.time.{ZonedDateTime}
+//import java.time.{ZonedDateTime, LocalDate}
+//import java.time.format.DateTimeFormatter
 import java.io.{InputStream, File, FileWriter}
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.{AtomicReference, AtomicInteger, AtomicBoolean}
 import com.amazonaws.event.ProgressEventType._
 
 import scala.concurrent.{Future, Promise, Await}
@@ -45,7 +47,7 @@ object DateTimeOrdering extends Ordering[ZonedDateTime] {
 
 object DataTransferEventType extends Enumeration {
   type DataTransferEventType = Value
-  val TransferProgress, TransferCompleted, TransferCanceled, TransferFailed = Value
+  val TransferStarted, TransferProgress, TransferCompleted, TransferCanceled, TransferFailed = Value
 }
 
 object Converters {
@@ -222,6 +224,9 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
       }
     }
 
+    def nowTime =
+      new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new java.util.Date)
+
     def downloadStateMachine(state: ArchiveTransferState, event: ProgressEvent): ArchiveTransferState =
       event.getEventType match {
         case TRANSFER_STARTED_EVENT => state.copy(transferring = true)
@@ -231,18 +236,22 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
       }
 
     def bytesBasedProgressReporter(tickInterval: Int): TransferProgressReporter = {
-      var prevPctMark = 0
+      val prevPctMark = new AtomicInteger
+      val warned = new AtomicBoolean
 
-      (state: ArchiveTransferState, event: ProgressEvent, listener: TransferEventListener) => {
-        if (state.bytesToTransfer.isDefined && state.transferring) {
-          val pct = ((state.bytesTransferred.toDouble / state.bytesToTransfer.get) * 100).toInt
-          if ((pct / tickInterval) > prevPctMark) {
-            prevPctMark = pct / tickInterval
-            listener(TransferProgress, state, s"transfer progress: $pct% (bytes: ${state.bytesTransferred})")
+      (state: ArchiveTransferState, event: ProgressEvent, listener: TransferEventListener) => state match {
+        case ArchiveTransferState(Some(bytesToTransfer), true, bytesTransferred) =>
+          val pct = ((bytesTransferred.toDouble / bytesToTransfer) * 100).toInt
+          if ((pct / tickInterval) > prevPctMark.get) {
+            prevPctMark.set(pct / tickInterval)
+            listener(TransferProgress, state, s"transfer progress: $pct% (bytes: ${bytesTransferred})")
           }
-        }
+        case ArchiveTransferState(None, _, _) if (!warned.compareAndSet(false, true)) =>
+          logger.warn("transfer size not known, relative transfer progress will not be reported")
       }
     }
+
+    //val IsoDateFmt = DateTimeFormatter.ISO_LOCAL_DATE_TIME
 
     def timeBasedProgressReporter(): TransferProgressReporter = ???
 
@@ -253,6 +262,7 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
         val state = new AtomicReference(initialState)
 
         def progressChanged(ev: ProgressEvent): Unit = ev.getEventType match {
+          case CLIENT_REQUEST_STARTED_EVENT => listener(TransferStarted, state.get, s"transfer started")
           case TRANSFER_COMPLETED_EVENT => listener(TransferCompleted, state.get, s"transfer completed")
           case TRANSFER_CANCELED_EVENT => listener(TransferCanceled, state.get, s"transfer canceled")
           case TRANSFER_FAILED_EVENT => listener(TransferFailed, state.get, s"transfer failed")
@@ -304,6 +314,7 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
     val archiveSize = catListArchives(vaultName).find(_.id == archiveId).map(_.size)
     val progressListener = awsTransferProgressListenerAdapter(ArchiveTransferState(archiveSize), downloadStateMachine,
       bytesBasedProgressReporter(DefaultTickInterval), printProgressListener)
+    logger.info(s"preparing archive $vaultName, $archiveId. this will take several hours")
     new ArchiveTransferManager(client, sqs, sns).
       download("-", vaultName, archiveId, new File(targetFile), progressListener)
   }
