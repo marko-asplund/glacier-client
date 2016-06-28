@@ -1,5 +1,7 @@
 # glacier-client
 
+[![Build Status](https://travis-ci.org/marko-asplund/glacier-client.svg?branch=master)](https://travis-ci.org/marko-asplund/glacier-client)
+
 Amazon Glacier backup tool with the following features
 - vault management: create, describe, list, delete
 - archive management: upload, delete, download
