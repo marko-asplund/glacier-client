@@ -1,4 +1,4 @@
-organization  := "fi.markoa"
+organization  := "com.practicingtechie"
 
 version       := "0.4.1"
 
@@ -14,3 +14,22 @@ libraryDependencies ++= Seq(
   "io.argonaut" %% "argonaut" % "6.1"
 )
 
+publishMavenStyle := true
+
+publishTo := Some("Central repo releases" at "https://oss.sonatype.org/service/local/staging/deploy/maven2/")
+
+licenses := Seq("Apache License, Version 2.0" -> url("http://www.apache.org/licenses/LICENSE-2.0.txt"))
+
+pomExtra := (
+  <url>https://github.com/marko-asplund/glacier-client</url>
+    <scm>
+      <url>git@github.com:marko-asplund/glacier-client.git</url>
+      <connection>scm:git:git@github.com:marko-asplund/glacier-client.git</connection>
+    </scm>
+    <developers>
+      <developer>
+        <id>marko-asplund</id>
+        <name>marko asplund</name>
+        <url>https://practicingtechie.com/</url>
+      </developer>
+    </developers>)
