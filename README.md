@@ -1,6 +1,7 @@
 # glacier-client
 
 [![Build Status](https://travis-ci.org/marko-asplund/glacier-client.svg?branch=master)](https://travis-ci.org/marko-asplund/glacier-client)
+[![Maven Central](https://maven-badges.herokuapp.com/maven-central/com.practicingtechie/glacier-backup-cli_2.11/badge.svg?style=plastic)](https://maven-badges.herokuapp.com/maven-central/com.practicingtechie/glacier-backup-cli_2.11)
 
 Amazon Glacier backup tool with the following features
 - vault management: create, describe, list, delete
