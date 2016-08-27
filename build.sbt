@@ -1,6 +1,6 @@
 organization  := "com.practicingtechie"
 
-version       := "0.4.1"
+version       := "0.4.2"
 
 scalaVersion  := "2.11.8"
 
@@ -10,7 +10,7 @@ libraryDependencies ++= Seq(
   "com.typesafe.scala-logging" %% "scala-logging" % "3.4.0",
   "ch.qos.logback" % "logback-classic" % "1.1.3",
   "org.scalatest" %% "scalatest" % "2.2.6" % "test",
-  "com.amazonaws" % "aws-java-sdk-glacier" % "1.11.11",
+  "com.amazonaws" % "aws-java-sdk-glacier" % "1.11.29",
   "io.argonaut" %% "argonaut" % "6.1"
 )
 
