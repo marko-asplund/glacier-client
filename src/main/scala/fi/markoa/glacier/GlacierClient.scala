@@ -5,7 +5,6 @@ import java.time.{ZonedDateTime}
 //import java.time.format.DateTimeFormatter
 import java.io.{InputStream, File, FileWriter}
 import java.util.concurrent.atomic.{AtomicReference, AtomicInteger, AtomicBoolean}
-import com.amazonaws.event.ProgressEventType._
 
 import scala.concurrent.{Future, Promise, Await}
 import scala.concurrent.duration._
@@ -14,15 +13,19 @@ import scala.collection.JavaConversions._
 import scala.io.Source
 import com.typesafe.scalalogging.Logger
 import org.slf4j.LoggerFactory
+
 import com.amazonaws.auth.AWSCredentialsProvider
 import com.amazonaws.auth.profile.ProfileCredentialsProvider
-import com.amazonaws.event.{ProgressListener => AWSProgressListener, ProgressEvent, ProgressEventType}
+
+import com.amazonaws.event.ProgressEventType._
+import com.amazonaws.event.{ProgressListener => AWSProgressListener, ProgressEvent}
 import com.amazonaws.regions.{Region, Regions}
-import com.amazonaws.services.sns.AmazonSNSClient
-import com.amazonaws.services.sqs.AmazonSQSClient
-import com.amazonaws.services.glacier.{AmazonGlacierClient, TreeHashGenerator}
+import com.amazonaws.services.sns.AmazonSNSClientBuilder
+import com.amazonaws.services.sqs.AmazonSQSClientBuilder
+import com.amazonaws.services.glacier.{AmazonGlacierClientBuilder, TreeHashGenerator}
 import com.amazonaws.services.glacier.model._
-import com.amazonaws.services.glacier.transfer.ArchiveTransferManager
+import com.amazonaws.services.glacier.transfer.ArchiveTransferManagerBuilder
+
 import argonaut._, Argonaut._
 
 
@@ -81,22 +84,19 @@ object Converters {
     "ArchiveList")
 }
 
-class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
+class GlacierClient(regionId: Regions, credentials: AWSCredentialsProvider) {
   import Converters._
 
   val logger = Logger(LoggerFactory.getLogger(classOf[GlacierClient]))
 
-  val region = Region.getRegion(regionName)
-  val client = new AmazonGlacierClient(credentials)
-  val sqs = new AmazonSQSClient(credentials)
-  val sns = new AmazonSNSClient(credentials)
-  client.setRegion(region)
-  sqs.setRegion(region)
-  sns.setRegion(region)
+  val region = Region.getRegion(regionId)
+  val client = AmazonGlacierClientBuilder.standard().withRegion(regionId).withCredentials(credentials).build()
+  val sqs = AmazonSQSClientBuilder.standard().withRegion(regionId).withCredentials(credentials).build()
+  val sns = AmazonSNSClientBuilder.standard().withRegion(regionId).withCredentials(credentials).build()
 
   val b64enc = java.util.Base64.getEncoder
   val b64dec = java.util.Base64.getDecoder
-  implicit val dataTimeOrder = DateTimeOrdering
+  implicit val dateTimeOrder = DateTimeOrdering
 
   val homeDir = new File(sys.props("user.home"), ".glacier-backup")
 
@@ -288,7 +288,7 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
     val hash = TreeHashGenerator.calculateTreeHash(sourceFile)
     val progressListener = awsTransferProgressListenerAdapter(ArchiveTransferState(Some(sourceFile.length)),
       uploadStateMachine, bytesBasedProgressReporter(5), printProgressListener)
-    val atm = new ArchiveTransferManager(client, credentials)
+    val atm = new ArchiveTransferManagerBuilder().withGlacierClient(client).build()
     val archivePromise = Promise[Archive]()
     Try(atm.upload("-", vaultName, archiveDescription, sourceFile, progressListener)) match {
       case Success(r) =>
@@ -315,7 +315,7 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
     val progressListener = awsTransferProgressListenerAdapter(ArchiveTransferState(archiveSize), downloadStateMachine,
       bytesBasedProgressReporter(DefaultTickInterval), printProgressListener)
     logger.info(s"preparing archive $vaultName, $archiveId. this will take several hours")
-    new ArchiveTransferManager(client, sqs, sns).
+    new ArchiveTransferManagerBuilder().withGlacierClient(client).withSqsClient(sqs).withSnsClient(sns).build().
       download("-", vaultName, archiveId, new File(targetFile), progressListener)
   }
 
@@ -328,7 +328,7 @@ class GlacierClient(regionName: Regions, credentials: AWSCredentialsProvider) {
     )
     val progressListener = awsTransferProgressListenerAdapter(ArchiveTransferState(archive.map(_.size)), downloadStateMachine,
       bytesBasedProgressReporter(DefaultTickInterval), printProgressListener)
-    new ArchiveTransferManager(client, sqs, sns).
+    new ArchiveTransferManagerBuilder().withGlacierClient(client).withSqsClient(sqs).withSnsClient(sns).build().
       downloadJobOutput("-", vaultName, jobId, new File(targetFile), progressListener)
   }
 
