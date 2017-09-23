@@ -1,16 +1,16 @@
 organization  := "com.practicingtechie"
 
-version       := "0.4.3"
+version       := "0.4.4"
 
 scalaVersion  := "2.11.11"
 
 scalacOptions := Seq("-feature", "-deprecation", "-encoding", "utf8")
 
 libraryDependencies ++= Seq(
-  "com.typesafe.scala-logging" %% "scala-logging" % "3.5.0",
+  "com.typesafe.scala-logging" %% "scala-logging" % "3.7.2",
   "ch.qos.logback" % "logback-classic" % "1.2.3",
-  "org.scalatest" %% "scalatest" % "3.0.1" % "test",
-  "com.amazonaws" % "aws-java-sdk-glacier" % "1.11.155",
+  "org.scalatest" %% "scalatest" % "3.0.4" % "test",
+  "com.amazonaws" % "aws-java-sdk-glacier" % "1.11.202",
   "io.argonaut" %% "argonaut" % "6.2"
 )
 
