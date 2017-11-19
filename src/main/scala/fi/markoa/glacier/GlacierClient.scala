@@ -339,7 +339,7 @@ class GlacierClient(regionId: Regions, credentials: AWSCredentialsProvider) {
 }
 
 object GlacierClient {
-  def regions = Regions.values
+  def regions = Regions.values.map(_.getName)
   def apply(region: Regions, credentials: AWSCredentialsProvider) = new GlacierClient(region, credentials)
   def apply(region: Regions): GlacierClient = apply(region, new ProfileCredentialsProvider)
   def apply(region: String): GlacierClient = apply(Regions.fromName(region))
