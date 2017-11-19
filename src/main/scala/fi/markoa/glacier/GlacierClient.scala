@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.{AtomicReference, AtomicInteger, AtomicBoolea
 import scala.concurrent.{Future, Promise, Await}
 import scala.concurrent.duration._
 import scala.util.{Try, Success, Failure}
-import scala.collection.JavaConversions._
+import scala.collection.JavaConverters._
 import scala.io.Source
 import com.typesafe.scalalogging.Logger
 import org.slf4j.LoggerFactory
@@ -111,7 +111,7 @@ class GlacierClient(regionId: Regions, credentials: AWSCredentialsProvider) {
     location
   }
 
-  def listVaults: Seq[Vault] = client.listVaults(new ListVaultsRequest).getVaultList.map(asVault)
+  def listVaults: Seq[Vault] = client.listVaults(new ListVaultsRequest).getVaultList.asScala.map(asVault)
 
   def deleteVault(vaultName: String): Unit = {
     client.deleteVault(new DeleteVaultRequest(vaultName))
@@ -161,7 +161,7 @@ class GlacierClient(regionId: Regions, credentials: AWSCredentialsProvider) {
     }
 
   def listJobs(vaultName: String): Seq[Job] =
-    client.listJobs(new ListJobsRequest(vaultName)).getJobList.map(asJob)
+    client.listJobs(new ListJobsRequest(vaultName)).getJobList.asScala.map(asJob)
 
   def retrieveInventory(vaultName: String, jobId: String): Option[AWSInventory] = {
     val o = getJobOutput(vaultName, jobId)
