@@ -2,7 +2,7 @@ organization  := "com.practicingtechie"
 
 version       := "0.4.4"
 
-scalaVersion  := "2.12.4"
+scalaVersion  := "2.12.10"
 
 scalacOptions := Seq("-feature", "-deprecation", "-encoding", "utf8")
 
