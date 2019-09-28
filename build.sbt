@@ -11,6 +11,7 @@ libraryDependencies ++= Seq(
   "ch.qos.logback" % "logback-classic" % "1.2.3",
   "org.scalatest" %% "scalatest" % "3.0.4" % "test",
   "software.amazon.awssdk" % "glacier" % "2.9.9",
+  "software.amazon.awssdk" % "auth" % "2.9.9",
   "io.argonaut" %% "argonaut" % "6.2"
 )
 
