@@ -10,7 +10,7 @@ libraryDependencies ++= Seq(
   "com.typesafe.scala-logging" %% "scala-logging" % "3.7.2",
   "ch.qos.logback" % "logback-classic" % "1.2.3",
   "org.scalatest" %% "scalatest" % "3.0.4" % "test",
-  "com.amazonaws" % "aws-java-sdk-glacier" % "1.11.202",
+  "com.amazonaws" % "aws-java-sdk-glacier" % "1.11.641",
   "io.argonaut" %% "argonaut" % "6.2"
 )
 
