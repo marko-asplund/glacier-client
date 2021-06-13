@@ -9,24 +9,25 @@ import java.util.concurrent.atomic.{AtomicReference, AtomicInteger, AtomicBoolea
 import scala.concurrent.{Future, Promise, Await}
 import scala.concurrent.duration._
 import scala.util.{Try, Success, Failure}
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 import scala.io.Source
 import com.typesafe.scalalogging.Logger
 import org.slf4j.LoggerFactory
 
-import com.amazonaws.auth.AWSCredentialsProvider
-import com.amazonaws.auth.profile.ProfileCredentialsProvider
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider
+import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider
 
-import com.amazonaws.event.ProgressEventType._
-import com.amazonaws.event.{ProgressListener => AWSProgressListener, ProgressEvent}
-import com.amazonaws.regions.{Region, Regions}
-import com.amazonaws.services.sns.AmazonSNSClientBuilder
-import com.amazonaws.services.sqs.AmazonSQSClientBuilder
-import com.amazonaws.services.glacier.{AmazonGlacierClientBuilder, TreeHashGenerator}
-import com.amazonaws.services.glacier.model._
-import com.amazonaws.services.glacier.transfer.ArchiveTransferManagerBuilder
+//import com.amazonaws.event.ProgressEventType._
+//import com.amazonaws.event.{ProgressListener => AWSProgressListener, ProgressEvent}
+import software.amazon.awssdk.regions.Region
+//import com.amazonaws.regions.{Region, Regions}
+//import com.amazonaws.services.sns.AmazonSNSClientBuilder
+//import com.amazonaws.services.sqs.AmazonSQSClientBuilder
+//import com.amazonaws.services.glacier.{AmazonGlacierClientBuilder, TreeHashGenerator}
+import software.amazon.awssdk.services.glacier.model._
+//import com.amazonaws.services.glacier.transfer.ArchiveTransferManagerBuilder
 
-import argonaut._, Argonaut._
+//import argonaut._, Argonaut._
 
 
 case class Vault(vaultARN: String, vaultName: String,
@@ -56,15 +57,19 @@ object DataTransferEventType extends Enumeration {
 object Converters {
   def parseOptDate(ds: String) = Option(ds).map(ZonedDateTime.parse)
 
-  def asVault(v: DescribeVaultOutput) = Vault(v.getVaultARN, v.getVaultName, ZonedDateTime.parse(v.getCreationDate),
-    parseOptDate(v.getLastInventoryDate), v.getNumberOfArchives, v.getSizeInBytes)
+  def vaultResultasVault(v: DescribeVaultResponse) = Vault(v.vaultARN, v.vaultName,
+    ZonedDateTime.parse(v.creationDate), parseOptDate(v.lastInventoryDate), v.numberOfArchives, v.sizeInBytes)
 
-  def vaultResultasVault(v: DescribeVaultResult) = Vault(v.getVaultARN, v.getVaultName,
-    ZonedDateTime.parse(v.getCreationDate), parseOptDate(v.getLastInventoryDate), v.getNumberOfArchives, v.getSizeInBytes)
+  def asVault(v: DescribeVaultOutput) = Vault(v.vaultARN, v.vaultName, ZonedDateTime.parse(v.creationDate),
+    parseOptDate(v.lastInventoryDate), v.numberOfArchives, v.sizeInBytes)
 
-  def asJob(j: GlacierJobDescription) = Job(j.getJobId, j.getVaultARN, j.getAction, j.getJobDescription,
-    ZonedDateTime.parse(j.getCreationDate), j.getStatusCode, j.getStatusMessage, parseOptDate(j.getCompletionDate),
-    Option(j.getArchiveId))
+}
+
+/*
+
+  def asJob(j: GlacierJobDescription) = Job(j.jobId, j.vaultARN, j.actionAsString, j.jobDescription,
+    ZonedDateTime.parse(j.creationDate), j.statusCode, j.statusMessage, parseOptDate(j.completionDate),
+    Option(j.archiveId))
 
   def asJobOutput(o: GetJobOutputResult) = JobOutput(o.getArchiveDescription, o.getContentType, o.getChecksum,
     o.getStatus, o.getBody)
@@ -83,16 +88,20 @@ object Converters {
   implicit def AWSInventoryCodecJson = casecodec3(AWSInventory.apply, AWSInventory.unapply)("VaultARN", "InventoryDate",
     "ArchiveList")
 }
+ */
 
-class GlacierClient(regionId: Regions, credentials: AWSCredentialsProvider) {
+class GlacierClient(region: Region, credentials: AwsCredentialsProvider) {
   import Converters._
 
   val logger = Logger(LoggerFactory.getLogger(classOf[GlacierClient]))
 
-  val region = Region.getRegion(regionId)
-  val client = AmazonGlacierClientBuilder.standard().withRegion(regionId).withCredentials(credentials).build()
-  val sqs = AmazonSQSClientBuilder.standard().withRegion(regionId).withCredentials(credentials).build()
-  val sns = AmazonSNSClientBuilder.standard().withRegion(regionId).withCredentials(credentials).build()
+  import software.amazon.awssdk.services.glacier.{GlacierClient => AWSGlacierClient}
+  import software.amazon.awssdk.regions.Region
+
+  val client = AWSGlacierClient.builder().region(region).build() // TODO: credentials
+
+  //val sqs = AmazonSQSClientBuilder.standard().withRegion(regionId).withCredentials(credentials).build()
+  //val sns = AmazonSNSClientBuilder.standard().withRegion(regionId).withCredentials(credentials).build()
 
   val b64enc = java.util.Base64.getEncoder
   val b64dec = java.util.Base64.getDecoder
@@ -103,23 +112,28 @@ class GlacierClient(regionId: Regions, credentials: AWSCredentialsProvider) {
 
   // ========= vault management =========
 
-  def describeVault(vaultName: String): Vault = vaultResultasVault(client.describeVault(new DescribeVaultRequest(vaultName)))
+  def describeVault(vaultName: String): Vault = {
+    vaultResultasVault(client.describeVault(DescribeVaultRequest.builder().vaultName(vaultName).build()))
+  }
 
+  /*
   def createVault(vaultName: String): String = {
     val location = client.createVault(new CreateVaultRequest(vaultName)).getLocation
     logger.info(s"vault created: $vaultName, $location")
     location
   }
+   */
 
-  def listVaults: Seq[Vault] = client.listVaults(new ListVaultsRequest).getVaultList.asScala.map(asVault)
+  def listVaults: Seq[Vault] = client.listVaults(ListVaultsRequest.builder().build()).vaultList.asScala.toSeq.map(asVault)
 
   def deleteVault(vaultName: String): Unit = {
-    client.deleteVault(new DeleteVaultRequest(vaultName))
+    client.deleteVault(DeleteVaultRequest.builder.vaultName(vaultName).build())
     logger.info(s"vault deleted: $vaultName")
   }
 
   // ========= local archive catalog management =========
 
+  /*
   def catListArchives(vaultName: String): Seq[Archive] = {
     val d = getVaultDir(region, vaultName)
     Option(d.list).getOrElse(Array.empty).flatMap { i =>
@@ -331,16 +345,17 @@ class GlacierClient(regionId: Regions, credentials: AWSCredentialsProvider) {
     new ArchiveTransferManagerBuilder().withGlacierClient(client).withSqsClient(sqs).withSnsClient(sns).build().
       downloadJobOutput("-", vaultName, jobId, new File(targetFile), progressListener)
   }
+   */
 
   // ========= other =========
 
-  def shutdown = client.shutdown
+  def shutdown = client.close()
 
 }
 
 object GlacierClient {
-  def regions = Regions.values.map(_.getName)
-  def apply(region: Regions, credentials: AWSCredentialsProvider) = new GlacierClient(region, credentials)
-  def apply(region: Regions): GlacierClient = apply(region, new ProfileCredentialsProvider)
-  def apply(region: String): GlacierClient = apply(Regions.fromName(region))
+  //def regions = Regions.values.map(_.getName)
+  def apply(region: Region, credentials: AwsCredentialsProvider) = new GlacierClient(region, credentials)
+  def apply(region: Region): GlacierClient = apply(region, ProfileCredentialsProvider.create())
+  def apply(region: String): GlacierClient = apply(Region.of(region))
 }

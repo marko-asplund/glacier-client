@@ -2,17 +2,17 @@ organization  := "com.practicingtechie"
 
 version       := "0.5.0"
 
-scalaVersion  := "2.12.10"
+scalaVersion  := "2.13.6"
 
 scalacOptions := Seq("-feature", "-deprecation", "-encoding", "utf8")
 
 libraryDependencies ++= Seq(
-  "com.typesafe.scala-logging" %% "scala-logging" % "3.7.2",
+  "com.typesafe.scala-logging" %% "scala-logging" % "3.9.3",
   "ch.qos.logback" % "logback-classic" % "1.2.3",
-  "org.scalatest" %% "scalatest" % "3.0.4" % "test",
-  "software.amazon.awssdk" % "glacier" % "2.9.9",
-  "software.amazon.awssdk" % "auth" % "2.9.9",
-  "io.argonaut" %% "argonaut" % "6.2"
+  "org.scalatest" %% "scalatest" % "3.2.9" % "test",
+  "software.amazon.awssdk" % "glacier" % "2.16.83",
+  "software.amazon.awssdk" % "auth" % "2.16.83",
+  //"io.argonaut" %% "argonaut" % "6.2.2"
 )
 
 publishMavenStyle := true
